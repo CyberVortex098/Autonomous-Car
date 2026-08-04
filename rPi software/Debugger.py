@@ -1,8 +1,9 @@
 import sys
 import collections
+
 import serial
 import serial.tools.list_ports
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
@@ -18,8 +19,10 @@ FIELD_MAP = {
     "$BUTTON": ["Button 1", "Button 2"]
 }
 
+
 class SerialHandler(QtCore.QThread):
     """Thread handling non-blocking serial read & write operations."""
+
     line_received = QtCore.pyqtSignal(str)
 
     def __init__(self, port, baudrate=921600):
@@ -51,8 +54,10 @@ class SerialHandler(QtCore.QThread):
         self.running = False
         self.wait()
 
+
 class MplCanvas(FigureCanvas):
     """Matplotlib Canvas Widget embedded into PyQt5."""
+
     def __init__(self, parent=None, width=8, height=6, dpi=100):
         self.fig = Figure(figsize=(width, height), dpi=dpi)
         self.ax = self.fig.add_subplot(111)
@@ -61,6 +66,33 @@ class MplCanvas(FigureCanvas):
         self.ax.set_xlabel("Samples")
         self.ax.set_ylabel("Value")
         self.ax.grid(True)
+
+
+class ColorSwatch(QtWidgets.QWidget):
+    """Large color box driven by R/G/B percentages (0-100)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(220, 220)
+        self._rgb = (0, 0, 0)
+
+    def set_percent(self, r_pct, g_pct, b_pct):
+        def conv(v):
+            return max(0, min(255, int(round(v * 2.55))))
+        self._rgb = (conv(r_pct), conv(g_pct), conv(b_pct))
+        self.update()
+
+    def rgb(self):
+        return self._rgb
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        p.setBrush(QtGui.QColor(*self._rgb))
+        p.setPen(QtGui.QPen(QtGui.QColor(60, 60, 60), 2))
+        p.drawRoundedRect(rect, 10, 10)
+
 
 class SerialPlotterApp(QtWidgets.QMainWindow):
     def __init__(self):
@@ -71,7 +103,6 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         # Storage buffers for time-series data
         self.data_buffers = {}
         self.checkboxes = {}
-
         self.serial_thread = None
         self.led1_state = False
         self.led2_state = False
@@ -100,7 +131,7 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         # --- Top Connection Bar ---
         top_bar = QtWidgets.QHBoxLayout()
         top_bar.addWidget(QtWidgets.QLabel("Serial Port:"))
-        
+
         self.port_combo = QtWidgets.QComboBox()
         self.refresh_ports()
         top_bar.addWidget(self.port_combo)
@@ -112,7 +143,7 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.btn_connect = QtWidgets.QPushButton("Connect")
         self.btn_connect.clicked.connect(self.toggle_connection)
         top_bar.addWidget(self.btn_connect)
-        
+
         top_bar.addStretch()
         main_layout.addLayout(top_bar)
 
@@ -129,6 +160,16 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         tab_outputs = QtWidgets.QWidget()
         self.init_outputs_tab(tab_outputs)
         self.tabs.addTab(tab_outputs, "Outputs")
+
+        # Tab 3: Movement Control
+        tab_move = QtWidgets.QWidget()
+        self.init_move_tab(tab_move)
+        self.tabs.addTab(tab_move, "Move")
+
+        # Tab 4: Color Visualizer
+        tab_color = QtWidgets.QWidget()
+        self.init_color_tab(tab_color)
+        self.tabs.addTab(tab_color, "Color Sensor")
 
     # ================= Telemetry Tab =================
     def init_telemetry_tab(self, parent):
@@ -151,13 +192,11 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
             msg_box = QtWidgets.QGroupBox(msg)
             msg_box_layout = QtWidgets.QVBoxLayout(msg_box)
             self.checkboxes[msg] = {}
-
             for field in fields:
                 cb = QtWidgets.QCheckBox(field)
                 cb.setChecked(False)
                 self.checkboxes[msg][field] = cb
                 msg_box_layout.addWidget(cb)
-
             scroll_layout.addWidget(msg_box)
 
         scroll_content.setLayout(scroll_layout)
@@ -199,14 +238,12 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         led_layout.addWidget(self.btn_led2_on)
         led_layout.addWidget(self.btn_led2_off)
         led_layout.addStretch()
-
         layout.addWidget(led_group)
 
         # 2. Buzzer Control Section
         buzzer_group = QtWidgets.QGroupBox("Buzzer Control ($BEEP)")
         buzzer_layout = QtWidgets.QHBoxLayout(buzzer_group)
 
-        # Frequency input
         buzzer_layout.addWidget(QtWidgets.QLabel("Frequency (Hz):"))
         self.spin_freq = QtWidgets.QSpinBox()
         self.spin_freq.setRange(50, 10000)
@@ -214,7 +251,6 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.spin_freq.setSingleStep(100)
         buzzer_layout.addWidget(self.spin_freq)
 
-        # Duration input
         buzzer_layout.addWidget(QtWidgets.QLabel("Duration (ms):"))
         self.spin_dur = QtWidgets.QSpinBox()
         self.spin_dur.setRange(10, 5000)
@@ -222,12 +258,10 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.spin_dur.setSingleStep(50)
         buzzer_layout.addWidget(self.spin_dur)
 
-        # Play Button
         btn_play_beep = QtWidgets.QPushButton("Trigger Beep")
         btn_play_beep.clicked.connect(self.send_beep_cmd)
         buzzer_layout.addWidget(btn_play_beep)
 
-        # Preset Tone Buttons
         btn_preset_alert = QtWidgets.QPushButton("Preset: Alert (2kHz / 100ms)")
         btn_preset_alert.clicked.connect(lambda: self.send_custom_beep(2000, 100))
         buzzer_layout.addWidget(btn_preset_alert)
@@ -259,10 +293,9 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
             slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
             slider.setRange(0, 180)
             slider.setValue(90)
-
             lbl_val = QtWidgets.QLabel("90°")
             lbl_val.setMinimumWidth(35)
-            
+
             slider.valueChanged.connect(lambda val, l=lbl_val: l.setText(f"{val}°"))
 
             btn_update = QtWidgets.QPushButton("Update")
@@ -280,15 +313,132 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         scroll_servo.setWidget(servo_content)
         servo_main_layout.addWidget(scroll_servo)
 
-        # Batch Servo Action Bar
         batch_layout = QtWidgets.QHBoxLayout()
         btn_all_90 = QtWidgets.QPushButton("Set All to 90°")
         btn_all_90.clicked.connect(self.set_all_servos_90)
         batch_layout.addWidget(btn_all_90)
         batch_layout.addStretch()
-
         servo_main_layout.addLayout(batch_layout)
+
         layout.addWidget(servo_group)
+
+    # ================= Move Tab =================
+    def init_move_tab(self, parent):
+        layout = QtWidgets.QVBoxLayout(parent)
+
+        # Translation ($MOVE)
+        move_group = QtWidgets.QGroupBox("Translation ($MOVE,x-speed,y-speed)")
+        move_layout = QtWidgets.QHBoxLayout(move_group)
+
+        move_layout.addWidget(QtWidgets.QLabel("X speed:"))
+        self.spin_x = QtWidgets.QSpinBox()
+        self.spin_x.setRange(-100, 100)
+        self.spin_x.setValue(0)
+        self.spin_x.setSingleStep(5)
+        move_layout.addWidget(self.spin_x)
+
+        move_layout.addWidget(QtWidgets.QLabel("Y speed:"))
+        self.spin_y = QtWidgets.QSpinBox()
+        self.spin_y.setRange(-100, 100)
+        self.spin_y.setValue(0)
+        self.spin_y.setSingleStep(5)
+        move_layout.addWidget(self.spin_y)
+
+        btn_move = QtWidgets.QPushButton("Update X / Y")
+        btn_move.clicked.connect(self.send_move_cmd)
+        move_layout.addWidget(btn_move)
+
+        btn_stop = QtWidgets.QPushButton("Stop (0,0)")
+        btn_stop.clicked.connect(self.send_stop_cmd)
+        move_layout.addWidget(btn_stop)
+
+        move_layout.addStretch()
+        layout.addWidget(move_group)
+
+        # Rotation ($ROTATE)
+        rot_group = QtWidgets.QGroupBox("Rotation ($ROTATE,speed,0)")
+        rot_layout = QtWidgets.QHBoxLayout(rot_group)
+
+        rot_layout.addWidget(QtWidgets.QLabel("Rotation speed:"))
+        self.spin_rot = QtWidgets.QSpinBox()
+        self.spin_rot.setRange(-100, 100)
+        self.spin_rot.setValue(0)
+        self.spin_rot.setSingleStep(5)
+        rot_layout.addWidget(self.spin_rot)
+
+        btn_rot = QtWidgets.QPushButton("Update Rotation")
+        btn_rot.clicked.connect(self.send_rotate_cmd)
+        rot_layout.addWidget(btn_rot)
+
+        btn_rot_stop = QtWidgets.QPushButton("Stop Rotation")
+        btn_rot_stop.clicked.connect(lambda: self.send_command("$ROTATE,0,0"))
+        rot_layout.addWidget(btn_rot_stop)
+
+        rot_layout.addStretch()
+        layout.addWidget(rot_group)
+
+        layout.addStretch()
+
+    # ================= Color Visualizer Tab =================
+    def init_color_tab(self, parent):
+        layout = QtWidgets.QHBoxLayout(parent)
+
+        # Left: field selectors for the $COLOR message
+        panel = QtWidgets.QWidget()
+        panel.setMaximumWidth(320)
+        panel_layout = QtWidgets.QVBoxLayout(panel)
+
+        group = QtWidgets.QGroupBox("$COLOR channels to visualize")
+        group_layout = QtWidgets.QVBoxLayout(group)
+
+        self.color_checkboxes = {}
+        for field in ["Red %", "Green %", "Blue %"]:
+            cb = QtWidgets.QCheckBox(field)
+            cb.setChecked(True)
+            self.color_checkboxes[field] = cb
+            group_layout.addWidget(cb)
+
+        panel_layout.addWidget(group)
+
+        self.lbl_lux = QtWidgets.QLabel("Lux: --")
+        panel_layout.addWidget(self.lbl_lux)
+
+        self.lbl_rgb_pct = QtWidgets.QLabel("R: -- %   G: -- %   B: -- %")
+        panel_layout.addWidget(self.lbl_rgb_pct)
+
+        self.lbl_rgb_255 = QtWidgets.QLabel("RGB: --, --, --")
+        panel_layout.addWidget(self.lbl_rgb_255)
+
+        self.lbl_hex = QtWidgets.QLabel("HEX: --")
+        panel_layout.addWidget(self.lbl_hex)
+
+        panel_layout.addStretch()
+
+        # Right: live color box (replaces the graph on this tab)
+        self.color_swatch = ColorSwatch()
+
+        layout.addWidget(panel)
+        layout.addWidget(self.color_swatch, stretch=1)
+
+    def update_color_view(self):
+        buf = self.data_buffers["$COLOR"]
+
+        def last(field):
+            d = buf[field]
+            return d[-1] if d else 0.0
+
+        r = last("Red %") if self.color_checkboxes["Red %"].isChecked() else 0.0
+        g = last("Green %") if self.color_checkboxes["Green %"].isChecked() else 0.0
+        b = last("Blue %") if self.color_checkboxes["Blue %"].isChecked() else 0.0
+
+        self.color_swatch.set_percent(r, g, b)
+        cr, cg, cb = self.color_swatch.rgb()
+
+        lux = buf["Lux"][-1] if buf["Lux"] else None
+        self.lbl_lux.setText(f"Lux: {lux:.1f}" if lux is not None else "Lux: --")
+        self.lbl_rgb_pct.setText(f"R: {r:.1f} %   G: {g:.1f} %   B: {b:.1f} %")
+        self.lbl_rgb_255.setText(f"RGB: {cr}, {cg}, {cb}")
+        self.lbl_hex.setText(f"HEX: #{cr:02X}{cg:02X}{cb:02X}")
 
     # ================= Command Handlers =================
     def set_led(self, led_num, state):
@@ -296,28 +446,33 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
             self.led1_state = state
         elif led_num == 2:
             self.led2_state = state
-
         cmd = f"$LED,{1 if self.led1_state else 0},{1 if self.led2_state else 0}"
         self.send_command(cmd)
 
     def send_beep_cmd(self):
-        freq = self.spin_freq.value()
-        dur = self.spin_dur.value()
-        cmd = f"$BEEP,{freq},{dur}"
-        self.send_command(cmd)
+        self.send_command(f"$BEEP,{self.spin_freq.value()},{self.spin_dur.value()}")
 
     def send_custom_beep(self, freq, dur):
-        cmd = f"$BEEP,{freq},{dur}"
-        self.send_command(cmd)
+        self.send_command(f"$BEEP,{freq},{dur}")
 
     def send_servo_cmd(self, channel, angle):
-        cmd = f"$SERVO,{channel},{angle},False,15"
-        self.send_command(cmd)
+        self.send_command(f"$SERVO,{channel},{angle},False,15")
 
     def set_all_servos_90(self):
         for ch, slider in enumerate(self.servo_sliders):
             slider.setValue(90)
             self.send_servo_cmd(ch, 90)
+
+    def send_move_cmd(self):
+        self.send_command(f"$MOVE,{self.spin_x.value()},{self.spin_y.value()}")
+
+    def send_stop_cmd(self):
+        self.spin_x.setValue(0)
+        self.spin_y.setValue(0)
+        self.send_command("$MOVE,0,0")
+
+    def send_rotate_cmd(self):
+        self.send_command(f"$ROTATE,{self.spin_rot.value()},0")
 
     def send_command(self, cmd):
         if self.serial_thread and self.serial_thread.isRunning():
@@ -329,8 +484,7 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
     # ================= Serial & UI Helpers =================
     def refresh_ports(self):
         self.port_combo.clear()
-        ports = serial.tools.list_ports.comports()
-        for p in ports:
+        for p in serial.tools.list_ports.comports():
             self.port_combo.addItem(p.device)
 
     def toggle_connection(self):
@@ -353,7 +507,6 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         tokens = line.split(',')
         if not tokens:
             return
-
         header = tokens[0]
         if header in FIELD_MAP:
             fields = FIELD_MAP[header]
@@ -371,7 +524,13 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
                 self.data_buffers[msg][field].clear()
 
     def update_plot(self):
-        if self.tabs.currentIndex() != 0:
+        current = self.tabs.tabText(self.tabs.currentIndex())
+
+        if current == "Color Sensor":
+            self.update_color_view()
+            return
+
+        if current != "Telemetry Plotter":
             return
 
         self.canvas.ax.cla()
@@ -391,8 +550,8 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
 
         if plotted:
             self.canvas.ax.legend(loc="upper left")
-
         self.canvas.draw()
+
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
