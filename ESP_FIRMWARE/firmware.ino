@@ -64,7 +64,7 @@ bool sensor_health=true;
 bool vl53_ready[4] = {false, false, false, false};
 
 const uint32_t LIDAR_PERIOD  = 28;   // ~35.5 Hz
-const uint32_t COLOR_PERIOD  = 50;   // ~20 Hz
+const uint32_t COLOR_PERIOD  = 105;   // 9.5~ Hz
 const uint32_t ADC_PERIOD    = 17;   // ~58.8 Hz
 const uint32_t BUTTON_PERIOD = 20;   // 50 Hz
 const uint32_t IMU_PERIOD    = 10;   // 100 Hz
@@ -270,7 +270,7 @@ float adsScaled(uint8_t channel) {
 void servoWriteDeg(uint8_t channel, float deg) {
   deg = constrain(deg, 0.0, 180.0);
   if(channel==3){
-    pca.setPWM(channel, 0, map(deg,0,180,150,570));
+    pca.setPWM(channel, 0, map(deg,0,180,140,555));
   } else {
     pca.setPWM(channel, 0, map(deg,0,180,140,510));
   }
@@ -323,6 +323,14 @@ void driveRotate(float speed) {
   servoWriteDeg(MOTOR_BL,(90+map(speed,-100,100,-90,90)));
   servoWriteDeg(MOTOR_BR,(90+map(speed,-100,100,-90,90)));
 }
+
+  void initServosToBoot(int ch,int deg){
+    servos[ch].current = 90;
+    servos[ch].target = 90;
+    servos[ch].speed = 60;
+    servos[ch].sweeping = false;
+    servoWriteDeg(ch, deg); // Set to active 90 deg position on boot (also = motor stop)
+  }
 
 // ================= Serial Command Parsing =================
 char serialBuf[64];
@@ -416,6 +424,7 @@ void serialPoll() {
 void setup() {
   Serial.begin(921600);
   Wire.begin();
+  Wire.setClock(400000);
 
   pinMode(BUTTON_PIN, INPUT);
   pinMode(BUTTON2_PIN, INPUT);
@@ -490,16 +499,21 @@ void setup() {
   // PCA9685 Servos
   pca.begin();
   pca.setPWMFreq(50.0);
-  for (uint8_t ch = 0; ch < SERVO_COUNT; ch++) {
-    servos[ch].current = 90;
-    servos[ch].target = 90;
-    servos[ch].speed = 60;
-    servos[ch].sweeping = false;
-    servoWriteDeg(ch, 90); // Set to active 90 deg position on boot (also = motor stop)
-  }
-  for(int i=0;i<91;i++){
-    servoWriteDeg(3,(90+i));
-  }
+
+  initServosToBoot(12, 90);
+  initServosToBoot(13, 90);
+  initServosToBoot(14, 90);
+  initServosToBoot(15, 90);
+
+  initServosToBoot(6,110);
+  initServosToBoot(7,90);
+
+  initServosToBoot(0, 85);
+  initServosToBoot(1, 120);
+  initServosToBoot(2, 90);
+  initServosToBoot(3, 90);
+  initServosToBoot(4, 112);
+  initServosToBoot(5, 160);
 
   if(sensor_health==false){
     for(int i=0;i<8;i++){
@@ -508,27 +522,27 @@ void setup() {
     }
   } else {
     // O4 a, O5 d c — repeated 3x, L8 (125ms)
-    tone(BUZZER_PIN, 440, 125); delay(125); // A4
-    tone(BUZZER_PIN, 587, 125); delay(125); // D5
-    tone(BUZZER_PIN, 523, 125); delay(125); // C5
+    tone(BUZZER_PIN, 440); delay(125); noTone(BUZZER_PIN); delay(4); // A4
+    tone(BUZZER_PIN, 587); delay(125); noTone(BUZZER_PIN); delay(4);// D5
+    tone(BUZZER_PIN, 523); delay(125); noTone(BUZZER_PIN); delay(4); // C5
 
-    tone(BUZZER_PIN, 440, 125); delay(125); // A4
-    tone(BUZZER_PIN, 587, 125); delay(125); // D5
-    tone(BUZZER_PIN, 523, 125); delay(125); // C5
+    tone(BUZZER_PIN, 440); delay(125); noTone(BUZZER_PIN); delay(4); // A4
+    tone(BUZZER_PIN, 587); delay(125); noTone(BUZZER_PIN); delay(4); // D5
+    tone(BUZZER_PIN, 523); delay(125); noTone(BUZZER_PIN); delay(4); // C5
 
-    tone(BUZZER_PIN, 440, 125); delay(125); // A4
-    tone(BUZZER_PIN, 587, 125); delay(125); // D5
-    tone(BUZZER_PIN, 523, 125); delay(125); // C5
+    tone(BUZZER_PIN, 440); delay(125); noTone(BUZZER_PIN); delay(4); // A4
+    tone(BUZZER_PIN, 587); delay(125); noTone(BUZZER_PIN); delay(4); // D5
+    tone(BUZZER_PIN, 523); delay(125); noTone(BUZZER_PIN); delay(4); // C5
 
     // L16 dcdcdcdc (63ms each), octave still 5
-    tone(BUZZER_PIN, 587, 63); delay(63); // D5
-    tone(BUZZER_PIN, 523, 63); delay(63); // C5
-    tone(BUZZER_PIN, 587, 63); delay(63); // D5
-    tone(BUZZER_PIN, 523, 63); delay(63); // C5
-    tone(BUZZER_PIN, 587, 63); delay(63); // D5
-    tone(BUZZER_PIN, 523, 63); delay(63); // C5
-    tone(BUZZER_PIN, 587, 63); delay(63); // D5
-    tone(BUZZER_PIN, 523, 63); delay(63); // C5
+    tone(BUZZER_PIN, 587); delay(63); noTone(BUZZER_PIN); delay(4); // D5
+    tone(BUZZER_PIN, 523); delay(63); noTone(BUZZER_PIN); delay(4); // C5
+    tone(BUZZER_PIN, 587); delay(63); noTone(BUZZER_PIN); delay(4); // D5
+    tone(BUZZER_PIN, 523); delay(63); noTone(BUZZER_PIN); delay(4); // C5
+    tone(BUZZER_PIN, 587); delay(63); noTone(BUZZER_PIN); delay(4); // D5
+    tone(BUZZER_PIN, 523); delay(63); noTone(BUZZER_PIN); delay(4); // C5
+    tone(BUZZER_PIN, 587); delay(63); noTone(BUZZER_PIN); delay(4); // D5
+    tone(BUZZER_PIN, 523); delay(63); noTone(BUZZER_PIN); delay(4); // C5
   }
 }
 
