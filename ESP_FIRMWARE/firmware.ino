@@ -508,10 +508,10 @@ void setup() {
   initServosToBoot(6,110);
   initServosToBoot(7,90);
 
-  initServosToBoot(0, 85);
+  initServosToBoot(0, 73);
   initServosToBoot(1, 120);
   initServosToBoot(2, 90);
-  initServosToBoot(3, 90);
+  initServosToBoot(3, 180);
   initServosToBoot(4, 112);
   initServosToBoot(5, 160);
 
