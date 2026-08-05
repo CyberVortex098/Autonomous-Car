@@ -4,7 +4,7 @@
 
 Install libraries using
 ```sh
-sudo pip install 
+pip install PyQt5 pyserial matplotlib
 ```
 
 ## Monitor
