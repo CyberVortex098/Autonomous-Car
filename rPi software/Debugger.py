@@ -1,4 +1,5 @@
 import sys
+import time
 import collections
 
 import serial
@@ -10,6 +11,9 @@ from matplotlib.figure import Figure
 # Maximum data points to retain on the plot buffer
 MAX_HISTORY = 300
 
+# How many timestamps to keep per message type for rate calculation
+RATE_WINDOW = 40
+
 # Mapping message types to their respective CSV fields
 FIELD_MAP = {
     "$IMU":    ["Gyro X", "Gyro Y", "Gyro Z", "Accel X", "Accel Y", "Accel Z", "Roll", "Pitch", "Yaw"],
@@ -18,6 +22,11 @@ FIELD_MAP = {
     "$ADC":    ["ADC 0 (%)", "ADC 1 (%)", "ADC 2 (%)"],
     "$BUTTON": ["Button 1", "Button 2"]
 }
+
+# ---- Global vars for PCA servo motion mode & speed ----
+# mode: 1 = smooth, 2 = direct, 3 = non-blocking
+mode = 1
+speed_val_for_pca = 100
 
 
 class SerialHandler(QtCore.QThread):
@@ -107,6 +116,10 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.led1_state = False
         self.led2_state = False
 
+        # Timestamp buffers + labels for per-message-type update rate (Hz)
+        self.msg_timestamps = {}
+        self.rate_labels = {}
+
         self.init_buffers()
         self.init_ui()
 
@@ -116,12 +129,19 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.plot_timer.timeout.connect(self.update_plot)
         self.plot_timer.start()
 
+        # Update rate labels timer (5 Hz refresh, no need to go faster)
+        self.rate_timer = QtCore.QTimer()
+        self.rate_timer.setInterval(200)
+        self.rate_timer.timeout.connect(self.update_rate_labels)
+        self.rate_timer.start()
+
     def init_buffers(self):
         """Initialize data queues for every variable field."""
         for msg, fields in FIELD_MAP.items():
             self.data_buffers[msg] = {}
             for field in fields:
                 self.data_buffers[msg][field] = collections.deque(maxlen=MAX_HISTORY)
+            self.msg_timestamps[msg] = collections.deque(maxlen=RATE_WINDOW)
 
     def init_ui(self):
         main_widget = QtWidgets.QWidget()
@@ -191,12 +211,22 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         for msg, fields in FIELD_MAP.items():
             msg_box = QtWidgets.QGroupBox(msg)
             msg_box_layout = QtWidgets.QVBoxLayout(msg_box)
+
+            # Rate label for this message type ("besides field name")
+            rate_lbl = QtWidgets.QLabel("-- Hz")
+            rate_lbl.setStyleSheet("color: gray; font-style: italic;")
+            self.rate_labels[msg] = rate_lbl
+            msg_box_layout.addWidget(rate_lbl)
+
             self.checkboxes[msg] = {}
             for field in fields:
+                row = QtWidgets.QHBoxLayout()
                 cb = QtWidgets.QCheckBox(field)
                 cb.setChecked(False)
                 self.checkboxes[msg][field] = cb
-                msg_box_layout.addWidget(cb)
+                row.addWidget(cb)
+                row.addStretch()
+                msg_box_layout.addLayout(row)
             scroll_layout.addWidget(msg_box)
 
         scroll_content.setLayout(scroll_layout)
@@ -276,6 +306,49 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         # 3. Servo Controls Section (16 Channels)
         servo_group = QtWidgets.QGroupBox("PCA9685 Servos (0 - 180°)")
         servo_main_layout = QtWidgets.QVBoxLayout(servo_group)
+
+        # --- Motion mode selector: smooth / direct / non-blocking (mutually exclusive) ---
+        mode_layout = QtWidgets.QHBoxLayout()
+        mode_layout.addWidget(QtWidgets.QLabel("Motion Mode:"))
+
+        self.mode_button_group = QtWidgets.QButtonGroup(self)
+        self.mode_button_group.setExclusive(True)
+
+        self.btn_mode_smooth = QtWidgets.QPushButton("Smooth")
+        self.btn_mode_direct = QtWidgets.QPushButton("Direct")
+        self.btn_mode_nonblocking = QtWidgets.QPushButton("Non-Blocking")
+
+        for btn in (self.btn_mode_smooth, self.btn_mode_direct, self.btn_mode_nonblocking):
+            btn.setCheckable(True)
+            mode_layout.addWidget(btn)
+
+        self.mode_button_group.addButton(self.btn_mode_smooth, 1)
+        self.mode_button_group.addButton(self.btn_mode_direct, 2)
+        self.mode_button_group.addButton(self.btn_mode_nonblocking, 3)
+
+        self.btn_mode_smooth.setChecked(True)  # default mode = 1 (smooth)
+
+        self.mode_button_group.idClicked.connect(self.set_pca_mode)
+
+        mode_layout.addStretch()
+        servo_main_layout.addLayout(mode_layout)
+
+        # --- Master speed slider (1-200) ---
+        speed_layout = QtWidgets.QHBoxLayout()
+        speed_layout.addWidget(QtWidgets.QLabel("Master Speed:"))
+
+        self.slider_pca_speed = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider_pca_speed.setRange(1, 200)
+        self.slider_pca_speed.setValue(speed_val_for_pca)
+        speed_layout.addWidget(self.slider_pca_speed)
+
+        self.lbl_pca_speed = QtWidgets.QLabel(str(speed_val_for_pca))
+        self.lbl_pca_speed.setMinimumWidth(35)
+        speed_layout.addWidget(self.lbl_pca_speed)
+
+        self.slider_pca_speed.valueChanged.connect(self.set_pca_speed)
+
+        servo_main_layout.addLayout(speed_layout)
 
         scroll_servo = QtWidgets.QScrollArea()
         scroll_servo.setWidgetResizable(True)
@@ -455,8 +528,20 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
     def send_custom_beep(self, freq, dur):
         self.send_command(f"$BEEP,{freq},{dur}")
 
+    def set_pca_mode(self, mode_id):
+        """Update the global PCA servo motion mode (1=smooth, 2=direct, 3=non-blocking)."""
+        global mode
+        mode = mode_id
+        print(f"PCA motion mode set to: {mode}")
+
+    def set_pca_speed(self, value):
+        """Update the global PCA servo master speed value."""
+        global speed_val_for_pca
+        speed_val_for_pca = value
+        self.lbl_pca_speed.setText(str(value))
+
     def send_servo_cmd(self, channel, angle):
-        self.send_command(f"$SERVO,{channel},{angle},False,15")
+        self.send_command(f"$SERVO,{channel},{angle},{mode},{speed_val_for_pca}")
 
     def set_all_servos_90(self):
         for ch, slider in enumerate(self.servo_sliders):
@@ -517,11 +602,31 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
                         self.data_buffers[header][field].append(val)
                     except ValueError:
                         pass
+            # Record arrival time for this message type so we can compute Hz
+            self.msg_timestamps[header].append(time.time())
+
+    def update_rate_labels(self):
+        """Recompute and display the update rate (Hz) for each message type."""
+        for msg, ts in self.msg_timestamps.items():
+            lbl = self.rate_labels.get(msg)
+            if lbl is None:
+                continue
+            if len(ts) >= 2:
+                span = ts[-1] - ts[0]
+                if span > 0:
+                    rate_hz = (len(ts) - 1) / span
+                    lbl.setText(f"{rate_hz:.1f} Hz")
+                else:
+                    lbl.setText("-- Hz")
+            else:
+                lbl.setText("-- Hz")
 
     def clear_buffers(self):
         for msg in self.data_buffers:
             for field in self.data_buffers[msg]:
                 self.data_buffers[msg][field].clear()
+        for msg in self.msg_timestamps:
+            self.msg_timestamps[msg].clear()
 
     def update_plot(self):
         current = self.tabs.tabText(self.tabs.currentIndex())
