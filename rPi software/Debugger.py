@@ -1,4 +1,5 @@
 import sys
+import time
 import collections
 
 import serial
@@ -9,6 +10,9 @@ from matplotlib.figure import Figure
 
 # Maximum data points to retain on the plot buffer
 MAX_HISTORY = 300
+
+# How many timestamps to keep per message type for rate calculation
+RATE_WINDOW = 40
 
 # Mapping message types to their respective CSV fields
 FIELD_MAP = {
@@ -112,6 +116,10 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.led1_state = False
         self.led2_state = False
 
+        # Timestamp buffers + labels for per-message-type update rate (Hz)
+        self.msg_timestamps = {}
+        self.rate_labels = {}
+
         self.init_buffers()
         self.init_ui()
 
@@ -121,12 +129,19 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.plot_timer.timeout.connect(self.update_plot)
         self.plot_timer.start()
 
+        # Update rate labels timer (5 Hz refresh, no need to go faster)
+        self.rate_timer = QtCore.QTimer()
+        self.rate_timer.setInterval(200)
+        self.rate_timer.timeout.connect(self.update_rate_labels)
+        self.rate_timer.start()
+
     def init_buffers(self):
         """Initialize data queues for every variable field."""
         for msg, fields in FIELD_MAP.items():
             self.data_buffers[msg] = {}
             for field in fields:
                 self.data_buffers[msg][field] = collections.deque(maxlen=MAX_HISTORY)
+            self.msg_timestamps[msg] = collections.deque(maxlen=RATE_WINDOW)
 
     def init_ui(self):
         main_widget = QtWidgets.QWidget()
@@ -196,12 +211,22 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         for msg, fields in FIELD_MAP.items():
             msg_box = QtWidgets.QGroupBox(msg)
             msg_box_layout = QtWidgets.QVBoxLayout(msg_box)
+
+            # Rate label for this message type ("besides field name")
+            rate_lbl = QtWidgets.QLabel("-- Hz")
+            rate_lbl.setStyleSheet("color: gray; font-style: italic;")
+            self.rate_labels[msg] = rate_lbl
+            msg_box_layout.addWidget(rate_lbl)
+
             self.checkboxes[msg] = {}
             for field in fields:
+                row = QtWidgets.QHBoxLayout()
                 cb = QtWidgets.QCheckBox(field)
                 cb.setChecked(False)
                 self.checkboxes[msg][field] = cb
-                msg_box_layout.addWidget(cb)
+                row.addWidget(cb)
+                row.addStretch()
+                msg_box_layout.addLayout(row)
             scroll_layout.addWidget(msg_box)
 
         scroll_content.setLayout(scroll_layout)
@@ -577,11 +602,31 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
                         self.data_buffers[header][field].append(val)
                     except ValueError:
                         pass
+            # Record arrival time for this message type so we can compute Hz
+            self.msg_timestamps[header].append(time.time())
+
+    def update_rate_labels(self):
+        """Recompute and display the update rate (Hz) for each message type."""
+        for msg, ts in self.msg_timestamps.items():
+            lbl = self.rate_labels.get(msg)
+            if lbl is None:
+                continue
+            if len(ts) >= 2:
+                span = ts[-1] - ts[0]
+                if span > 0:
+                    rate_hz = (len(ts) - 1) / span
+                    lbl.setText(f"{rate_hz:.1f} Hz")
+                else:
+                    lbl.setText("-- Hz")
+            else:
+                lbl.setText("-- Hz")
 
     def clear_buffers(self):
         for msg in self.data_buffers:
             for field in self.data_buffers[msg]:
                 self.data_buffers[msg][field].clear()
+        for msg in self.msg_timestamps:
+            self.msg_timestamps[msg].clear()
 
     def update_plot(self):
         current = self.tabs.tabText(self.tabs.currentIndex())
