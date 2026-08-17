@@ -29,6 +29,6 @@
 ---
 
 **Servo Modes**
-- `1` — Smooth (blocking interpolated sweep)
+- `1` — Blocking ramp-up; in practice smoother than `3`
 - `2` — Direct (instant jump to angle)
-- `3` — Non-blocking (interpolated, returns immediately)
+- `3` — Non-blocking ramp-up
