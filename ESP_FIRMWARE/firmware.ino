@@ -61,6 +61,7 @@ float rollOffset = 0;
 float pitchOffset = 0;
 float VX=0;
 float VY=0;
+float SPEED=0;
 bool ledState1 = false;
 bool ledState2 = false;
 bool sensor_health=true;
@@ -223,36 +224,31 @@ void servosUpdate(float dt) {
   }
 }
 
-void driveMecanum(float vx, float vy) {
+void driveMecanum(float vx, float vy, float speed) {
   VX=vx;
   VY=vy;
+  SPEED=speed;
   vx = map(constrain(vx, -100.0, 100.0),-100,100,-90,90);
   vy = map(constrain(vy, -100.0, 100.0),-100,100,-90,90);
+  speed = map(constrain(speed, -100.0, 100.0),-100,100,-90,90);
 
-  float tmag=fabsf(vx)+fabsf(vy);
+  float tmag=fabsf(vx)+fabsf(vy)+fabsf(speed);
   if(tmag>90){
     float magnitude=90.0f/tmag;
     vx*=magnitude;
     vy*=magnitude;
+    speed*=magnitude;
   }
 
-  float fl = 90 + (vy + vx);
-  float fr = 90 - (vy - vx);
-  float bl = 90 + (vy - vx);
-  float br = 90 - (vy + vx);
+  float fl = 90 + (vy + vx) + speed;
+  float fr = 90 - (vy - vx) + speed;
+  float bl = 90 + (vy - vx) + speed;
+  float br = 90 - (vy + vx) + speed;
 
   servoWriteDeg(MOTOR_FL,fl);
   servoWriteDeg(MOTOR_FR,fr);
   servoWriteDeg(MOTOR_BL,bl);
   servoWriteDeg(MOTOR_BR,br);
-}
-
-void driveRotate(float speed) {
-  speed = constrain(speed, -100.0, 100.0);
-  servoWriteDeg(MOTOR_FL,(90+map(speed,-100,100,-90,90)));
-  servoWriteDeg(MOTOR_FR,(90+map(speed,-100,100,-90,90)));
-  servoWriteDeg(MOTOR_BL,(90+map(speed,-100,100,-90,90)));
-  servoWriteDeg(MOTOR_BR,(90+map(speed,-100,100,-90,90)));
 }
 
 void initServosToBoot(int ch,int deg){
@@ -324,21 +320,14 @@ void processCommand(char *line) {
     // ySpeed: forward/back, +ve = forward, -ve = back
     char *xStr = strtok(NULL, ",");
     char *yStr = strtok(NULL, ",");
+    char *speedStr = strtok(NULL, ",");
     if (!xStr || !yStr) return;
-
+    
     float vx = constrain((float)atof(xStr), -100.0, 100.0);
     float vy = constrain((float)atof(yStr), -100.0, 100.0);
+    float rot_speed = speedStr ? constrain((float)atof(speedStr), -100.0, 100.0) : 0.0f;
 
-    driveMecanum(vx, vy);
-  } else if (strcmp(tok, "$ROTATE") == 0) {
-    // $ROTATE,speed -- -100..100, +ve = CW viewed from above, -ve = CCW.
-    // Keeps rotating at this speed until the next $ROTATE/$MOVE.
-    char *speedStr = strtok(NULL, ",");
-    if (!speedStr) return;
-
-    float speed = constrain((float)atof(speedStr), -100.0, 100.0);
-
-    driveRotate(speed);
+    driveMecanum(vx, vy,rot_speed);
   }
 }
 
@@ -553,10 +542,10 @@ void loop() {
   }
   
   if(AVOIDER_ENABLED){
-    if(VX > 0 && vl53_ready[RIGHT_LIDAR]  && d[RIGHT_LIDAR]  <= STOP_THRES) driveMecanum(0, VY);
-    if(VX < 0 && vl53_ready[LEFT_LIDAR]   && d[LEFT_LIDAR]   <= STOP_THRES) driveMecanum(0, VY);
-    if(VY > 0 && vl53_ready[FORWARD_LIDAR]&& d[FORWARD_LIDAR]<= STOP_THRES) driveMecanum(VX, 0);
-    if(VY < 0 && vl53_ready[BACKWARD_LIDAR]&&d[BACKWARD_LIDAR]<=STOP_THRES) driveMecanum(VX, 0);
+    if(VX > 0 && vl53_ready[RIGHT_LIDAR]  && d[RIGHT_LIDAR]  <= STOP_THRES) driveMecanum(0, VY, SPEED);
+    if(VX < 0 && vl53_ready[LEFT_LIDAR]   && d[LEFT_LIDAR]   <= STOP_THRES) driveMecanum(0, VY, SPEED);
+    if(VY > 0 && vl53_ready[FORWARD_LIDAR]&& d[FORWARD_LIDAR]<= STOP_THRES) driveMecanum(VX, 0, SPEED);
+    if(VY < 0 && vl53_ready[BACKWARD_LIDAR]&&d[BACKWARD_LIDAR]<=STOP_THRES) driveMecanum(VX, 0, SPEED);
   }
   // Color (TCS34725) Loop
   if (now - tColor >= COLOR_PERIOD) {
