@@ -30,6 +30,12 @@
 #define ADS1115_ADDR    0x48   // 4-channel ADC I2C Address
 #define MPU_ADDR 0x68          //  MPU6050 Address
 #define SERVO_COUNT   16       // Channels on PCA9685 (0-15, end inclusive)
+#define AVOIDER_ENABLED 1
+#define FORWARD_LIDAR 1
+#define BACKWARD_LIDAR 2
+#define RIGHT_LIDAR 0
+#define LEFT_LIDAR 3
+#define STOP_THRES 50
 
 const float threshold_lidar=3501;             // to limit false readings or out-of-range 8192 reading
 const float ACC_SENS = 16384.0;
@@ -53,10 +59,13 @@ float lastGX = 0, lastGY = 0, lastGZ = 0;
 float lastAX = 0, lastAY = 0, lastAZ = 0;
 float rollOffset = 0;
 float pitchOffset = 0;
+float VX=0;
+float VY=0;
 bool ledState1 = false;
 bool ledState2 = false;
 bool sensor_health=true;
 bool vl53_ready[4] = {false, false, false, false};
+uint16_t d[4] = {0,0,0,0}; // move to global scope
 bool lastButtonState = HIGH;
 bool lastButton2State = HIGH;                
 char serialBuf[64];                          
@@ -215,11 +224,12 @@ void servosUpdate(float dt) {
 }
 
 void driveMecanum(float vx, float vy) {
+  VX=vx;
+  VY=vy;
   vx = map(constrain(vx, -100.0, 100.0),-100,100,-90,90);
   vy = map(constrain(vy, -100.0, 100.0),-100,100,-90,90);
 
   float tmag=fabsf(vx)+fabsf(vy);
-
   if(tmag>90){
     float magnitude=90.0f/tmag;
     vx*=magnitude;
@@ -521,7 +531,6 @@ void loop() {
   // Distance (VL53L0X) Loop
   if (now - tLidar >= LIDAR_PERIOD) {
     tLidar = now;
-    uint16_t d[4] = {0, 0, 0, 0};
     for (uint8_t i = 0; i < 4; i++) {
       if (vl53_ready[i]) {
         muxSelect(VL_CHANNELS[i]);
@@ -542,7 +551,13 @@ void loop() {
     Serial.print(d[2]); Serial.print(",");
     Serial.println(d[3]);
   }
-
+  
+  if(AVOIDER_ENABLED){
+    if(VX > 0 && vl53_ready[RIGHT_LIDAR]  && d[RIGHT_LIDAR]  <= STOP_THRES) driveMecanum(0, VY);
+    if(VX < 0 && vl53_ready[LEFT_LIDAR]   && d[LEFT_LIDAR]   <= STOP_THRES) driveMecanum(0, VY);
+    if(VY > 0 && vl53_ready[FORWARD_LIDAR]&& d[FORWARD_LIDAR]<= STOP_THRES) driveMecanum(VX, 0);
+    if(VY < 0 && vl53_ready[BACKWARD_LIDAR]&&d[BACKWARD_LIDAR]<=STOP_THRES) driveMecanum(VX, 0);
+  }
   // Color (TCS34725) Loop
   if (now - tColor >= COLOR_PERIOD) {
     tColor = now;
