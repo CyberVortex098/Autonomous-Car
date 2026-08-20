@@ -33,9 +33,8 @@
 #define AVOIDER_ENABLED 1
 #define FORWARD_LIDAR 1
 #define BACKWARD_LIDAR 2
-#define RIGHT_LIDAR 0
-#define LEFT_LIDAR 3
-#define STOP_THRES 50
+#define RIGHT_LIDAR 3
+#define LEFT_LIDAR 0
 
 const float threshold_lidar=3501;             // to limit false readings or out-of-range 8192 reading
 const float ACC_SENS = 16384.0;
@@ -62,6 +61,7 @@ float pitchOffset = 0;
 float VX=0;
 float VY=0;
 float SPEED=0;
+float STOP_THRES = 50;
 bool ledState1 = false;
 bool ledState2 = false;
 bool sensor_health=true;
@@ -328,6 +328,13 @@ void processCommand(char *line) {
     float rot_speed = speedStr ? constrain((float)atof(speedStr), -100.0, 100.0) : 0.0f;
 
     driveMecanum(vx, vy,rot_speed);
+  } else if (strcmp(tok, "$STOPTHRES") == 0) {
+    // $MOVE,xSpeed,ySpeed -- both -100..100.
+    // xSpeed: strafe, +ve = right, -ve = left
+    // ySpeed: forward/back, +ve = forward, -ve = back
+    char *STR = strtok(NULL, ",");
+    if (!STR) return;
+    STOP_THRES = constrain((float)atof(STR), 0.0, 3500.0);
   }
 }
 
@@ -542,10 +549,22 @@ void loop() {
   }
   
   if(AVOIDER_ENABLED){
-    if(VX > 0 && vl53_ready[RIGHT_LIDAR]  && d[RIGHT_LIDAR]  <= STOP_THRES) driveMecanum(0, VY, SPEED);
-    if(VX < 0 && vl53_ready[LEFT_LIDAR]   && d[LEFT_LIDAR]   <= STOP_THRES) driveMecanum(0, VY, SPEED);
-    if(VY > 0 && vl53_ready[FORWARD_LIDAR]&& d[FORWARD_LIDAR]<= STOP_THRES) driveMecanum(VX, 0, SPEED);
-    if(VY < 0 && vl53_ready[BACKWARD_LIDAR]&&d[BACKWARD_LIDAR]<=STOP_THRES) driveMecanum(VX, 0, SPEED);
+    if(VX > 0 && vl53_ready[RIGHT_LIDAR]  && d[RIGHT_LIDAR]  <= STOP_THRES){
+      driveMecanum(0, VY, 0);
+      Serial.print("$OBSTACLE,"); Serial.println(RIGHT_LIDAR);
+    }
+    if(VX < 0 && vl53_ready[LEFT_LIDAR]   && d[LEFT_LIDAR]   <= STOP_THRES){
+      driveMecanum(0, VY, 0);
+      Serial.print("$OBSTACLE,"); Serial.println(LEFT_LIDAR);
+    }
+    if(VY > 0 && vl53_ready[FORWARD_LIDAR]&& d[FORWARD_LIDAR]<= STOP_THRES){
+      driveMecanum(VX, 0, 0);
+      Serial.print("$OBSTACLE,"); Serial.println(FORWARD_LIDAR);
+    }
+    if(VY < 0 && vl53_ready[BACKWARD_LIDAR]&&d[BACKWARD_LIDAR]<=STOP_THRES){
+      driveMecanum(VX, 0, 0);
+      Serial.print("$OBSTACLE,"); Serial.println(BACKWARD_LIDAR);
+    }
   }
   // Color (TCS34725) Loop
   if (now - tColor >= COLOR_PERIOD) {
