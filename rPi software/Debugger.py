@@ -314,9 +314,9 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.mode_button_group = QtWidgets.QButtonGroup(self)
         self.mode_button_group.setExclusive(True)
 
-        self.btn_mode_smooth = QtWidgets.QPushButton("Smooth")
+        self.btn_mode_smooth = QtWidgets.QPushButton("Non-blocking")
         self.btn_mode_direct = QtWidgets.QPushButton("Direct")
-        self.btn_mode_nonblocking = QtWidgets.QPushButton("Non-Blocking")
+        self.btn_mode_nonblocking = QtWidgets.QPushButton("Smooth")
 
         for btn in (self.btn_mode_smooth, self.btn_mode_direct, self.btn_mode_nonblocking):
             btn.setCheckable(True)
@@ -399,8 +399,8 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
     def init_move_tab(self, parent):
         layout = QtWidgets.QVBoxLayout(parent)
 
-        # Translation ($MOVE)
-        move_group = QtWidgets.QGroupBox("Translation ($MOVE,x-speed,y-speed)")
+        # Combined Translation + Rotation ($MOVE,x-speed,y-speed,rot-speed)
+        move_group = QtWidgets.QGroupBox("Move ($MOVE,x-speed,y-speed,rot-speed)")
         move_layout = QtWidgets.QHBoxLayout(move_group)
 
         move_layout.addWidget(QtWidgets.QLabel("X speed:"))
@@ -417,38 +417,60 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         self.spin_y.setSingleStep(5)
         move_layout.addWidget(self.spin_y)
 
-        btn_move = QtWidgets.QPushButton("Update X / Y")
+        move_layout.addWidget(QtWidgets.QLabel("Rotation speed:"))
+        self.spin_rot = QtWidgets.QSpinBox()
+        self.spin_rot.setRange(-100, 100)
+        self.spin_rot.setValue(0)
+        self.spin_rot.setSingleStep(5)
+        move_layout.addWidget(self.spin_rot)
+
+        btn_move = QtWidgets.QPushButton("Update X / Y / Rot")
         btn_move.clicked.connect(self.send_move_cmd)
         move_layout.addWidget(btn_move)
 
-        btn_stop = QtWidgets.QPushButton("Stop (0,0)")
+        btn_stop = QtWidgets.QPushButton("Stop All (0,0,0)")
         btn_stop.clicked.connect(self.send_stop_cmd)
         move_layout.addWidget(btn_stop)
 
         move_layout.addStretch()
         layout.addWidget(move_group)
 
-        # Rotation ($ROTATE)
-        rot_group = QtWidgets.QGroupBox("Rotation ($ROTATE,speed,0)")
-        rot_layout = QtWidgets.QHBoxLayout(rot_group)
+        # Stop threshold ($STOPTHRES)
+        thres_group = QtWidgets.QGroupBox("Obstacle Stop Threshold ($STOPTHRES,val)")
+        thres_layout = QtWidgets.QHBoxLayout(thres_group)
 
-        rot_layout.addWidget(QtWidgets.QLabel("Rotation speed:"))
-        self.spin_rot = QtWidgets.QSpinBox()
-        self.spin_rot.setRange(-100, 100)
-        self.spin_rot.setValue(0)
-        self.spin_rot.setSingleStep(5)
-        rot_layout.addWidget(self.spin_rot)
+        thres_layout.addWidget(QtWidgets.QLabel("Threshold (mm):"))
+        self.spin_stopthres = QtWidgets.QSpinBox()
+        self.spin_stopthres.setRange(0, 3500)
+        self.spin_stopthres.setValue(0)
+        self.spin_stopthres.setSingleStep(50)
+        thres_layout.addWidget(self.spin_stopthres)
 
-        btn_rot = QtWidgets.QPushButton("Update Rotation")
-        btn_rot.clicked.connect(self.send_rotate_cmd)
-        rot_layout.addWidget(btn_rot)
+        btn_stopthres = QtWidgets.QPushButton("Update Threshold")
+        btn_stopthres.clicked.connect(self.send_stopthres_cmd)
+        thres_layout.addWidget(btn_stopthres)
 
-        btn_rot_stop = QtWidgets.QPushButton("Stop Rotation")
-        btn_rot_stop.clicked.connect(lambda: self.send_command("$ROTATE,0,0"))
-        rot_layout.addWidget(btn_rot_stop)
+        thres_layout.addStretch()
+        layout.addWidget(thres_group)
 
-        rot_layout.addStretch()
-        layout.addWidget(rot_group)
+        # Obstacle warning log ($OBSTACLE)
+        obstacle_group = QtWidgets.QGroupBox("Obstacle Warnings ($OBSTACLE)")
+        obstacle_layout = QtWidgets.QVBoxLayout(obstacle_group)
+
+        self.lbl_obstacle_latest = QtWidgets.QLabel("No obstacle messages received yet.")
+        self.lbl_obstacle_latest.setStyleSheet("font-weight: bold; color: #b02a2a;")
+        obstacle_layout.addWidget(self.lbl_obstacle_latest)
+
+        self.obstacle_log = QtWidgets.QTextEdit()
+        self.obstacle_log.setReadOnly(True)
+        self.obstacle_log.setMaximumHeight(180)
+        obstacle_layout.addWidget(self.obstacle_log)
+
+        btn_clear_obstacle = QtWidgets.QPushButton("Clear Log")
+        btn_clear_obstacle.clicked.connect(self.obstacle_log.clear)
+        obstacle_layout.addWidget(btn_clear_obstacle)
+
+        layout.addWidget(obstacle_group)
 
         layout.addStretch()
 
@@ -549,15 +571,16 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
             self.send_servo_cmd(ch, 90)
 
     def send_move_cmd(self):
-        self.send_command(f"$MOVE,{self.spin_x.value()},{self.spin_y.value()}")
+        self.send_command(f"$MOVE,{self.spin_x.value()},{self.spin_y.value()},{self.spin_rot.value()}")
 
     def send_stop_cmd(self):
         self.spin_x.setValue(0)
         self.spin_y.setValue(0)
-        self.send_command("$MOVE,0,0")
+        self.spin_rot.setValue(0)
+        self.send_command("$MOVE,0,0,0")
 
-    def send_rotate_cmd(self):
-        self.send_command(f"$ROTATE,{self.spin_rot.value()},0")
+    def send_stopthres_cmd(self):
+        self.send_command(f"$STOPTHRES,{self.spin_stopthres.value()}")
 
     def send_command(self, cmd):
         if self.serial_thread and self.serial_thread.isRunning():
@@ -593,6 +616,11 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
         if not tokens:
             return
         header = tokens[0]
+
+        if header == "$OBSTACLE":
+            self.handle_obstacle_message(line, tokens)
+            return
+
         if header in FIELD_MAP:
             fields = FIELD_MAP[header]
             for i, field in enumerate(fields):
@@ -604,6 +632,15 @@ class SerialPlotterApp(QtWidgets.QMainWindow):
                         pass
             # Record arrival time for this message type so we can compute Hz
             self.msg_timestamps[header].append(time.time())
+
+    def handle_obstacle_message(self, raw_line, tokens):
+        """Display an incoming $OBSTACLE message on the Move tab."""
+        detail = ",".join(tokens[1:]) if len(tokens) > 1 else ""
+        timestamp = time.strftime("%H:%M:%S")
+        display_text = f"{raw_line}" if not detail else f"$OBSTACLE ({detail})"
+
+        self.lbl_obstacle_latest.setText(f"[{timestamp}] {display_text}")
+        self.obstacle_log.append(f"[{timestamp}] {raw_line}")
 
     def update_rate_labels(self):
         """Recompute and display the update rate (Hz) for each message type."""
