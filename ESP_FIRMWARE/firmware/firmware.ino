@@ -58,15 +58,15 @@ float lastGX = 0, lastGY = 0, lastGZ = 0;
 float lastAX = 0, lastAY = 0, lastAZ = 0;
 float rollOffset = 0;
 float pitchOffset = 0;
-float VX=0;
-float VY=0;
-float SPEED=0;
+volatile float VX=0;   // only ever touched from core 1 (fastwork/driveMecanum) in this split
+volatile float VY=0;   // no cross-core mutex needed, but kept volatile for safety
+volatile float SPEED=0;
 float STOP_THRES = 50;
 bool ledState1 = false;
 bool ledState2 = false;
 bool sensor_health=true;
-bool vl53_ready[4] = {false, false, false, false};
-uint16_t d[4] = {0,0,0,0}; // move to global scope
+volatile bool vl53_ready[4] = {false, false, false, false}; // write-once at setup(), read-only after -> safe unprotected
+volatile uint16_t d[4] = {0,0,0,0}; // move to global scope -- WRITTEN on core 0 (slowwork), READ on core 1 (fastwork) -> protect with dMux
 bool lastButtonState = HIGH;
 bool lastButton2State = HIGH;                
 char serialBuf[64];                          
@@ -82,6 +82,14 @@ struct ServoState {
   float speed;     // deg/sec, used only while sweeping
   bool  sweeping;  // boolean to activate sweeping
 };
+
+// ===== Dual-core sync primitives =====
+portMUX_TYPE dMux = portMUX_INITIALIZER_UNLOCKED;   // protects d[] (written core0, read core1)
+SemaphoreHandle_t serialMux;                        // protects Serial.print() from interleaving across cores
+SemaphoreHandle_t i2cMux;                           // protects the shared I2C bus (MPU+PCA9685 on core1, ADS+VL53+TCS on core0)
+
+TaskHandle_t fastTaskHandle = NULL;
+TaskHandle_t slowTaskHandle = NULL;
 
 ServoState servos[SERVO_COUNT];
 
@@ -116,6 +124,7 @@ void mpuReadRaw(int16_t &ax, int16_t &ay, int16_t &az, int16_t &gx, int16_t &gy,
 }
 
 void mpu6050Calibrate() {
+  // runs only during setup(), single-threaded, no i2cMux needed here
   Serial.println("Calibrating gyro, keep still...");
   long sx = 0, sy = 0, sz = 0;
   const int N = 500;
@@ -145,8 +154,12 @@ void mpu6050Calibrate() {
 }
 
 void mpu6050Update() {
+  // called at runtime from fastwork (core 1) -- guard the I2C transaction
   int16_t ax, ay, az, gx, gy, gz;
+  xSemaphoreTake(i2cMux, portMAX_DELAY);
   mpuReadRaw(ax, ay, az, gx, gy, gz);
+  xSemaphoreGive(i2cMux);
+
   lastAX = ax; lastAY = ay; lastAZ = az;
   lastGX = gx; lastGY = gy; lastGZ = gz;
 
@@ -192,21 +205,29 @@ void buttonPoll() {
 }
 
 float adsScaled(uint8_t channel) {
+  // called from slowwork (core 0) -- guard the I2C transaction
+  xSemaphoreTake(i2cMux, portMAX_DELAY);
   int16_t raw = ads.readADC_SingleEnded(channel);
+  float voltage = ads.computeVolts(raw);
+  xSemaphoreGive(i2cMux);
   // Full scale range is +-4.096V (32767 count = 4.096V)
   // Scaling relative to 3.3V max input voltage:
-  float voltage = ads.computeVolts(raw);
   float pct = (voltage / 3.3f) * 100.0f;
   return constrain(pct, 0.0f, 100.0f);
 }
 
 void servoWriteDeg(uint8_t channel, float deg) {
+  // PCA9685 is only ever called from core 1 in this split (servosUpdate, driveMecanum,
+  // processCommand $SERVO), so no cross-core race here, but it shares the physical I2C
+  // bus with core 0's sensors, so still guard it with i2cMux to keep transactions atomic.
   deg = constrain(deg, 0.0, 180.0);
+  xSemaphoreTake(i2cMux, portMAX_DELAY);
   if(channel==3){
     pca.setPWM(channel, 0, map(deg,0,180,140,555));
   } else {
     pca.setPWM(channel, 0, map(deg,0,180,140,510));
   }
+  xSemaphoreGive(i2cMux);
 }
 
 void servosUpdate(float dt) {
@@ -329,9 +350,6 @@ void processCommand(char *line) {
 
     driveMecanum(vx, vy,rot_speed);
   } else if (strcmp(tok, "$STOPTHRES") == 0) {
-    // $MOVE,xSpeed,ySpeed -- both -100..100.
-    // xSpeed: strafe, +ve = right, -ve = left
-    // ySpeed: forward/back, +ve = forward, -ve = back
     char *STR = strtok(NULL, ",");
     if (!STR) return;
     STOP_THRES = constrain((float)atof(STR), 0.0, 3500.0);
@@ -353,6 +371,166 @@ void serialPoll() {
   }
 }
 
+// ================= Task bodies =================
+
+void fastworkTask(void *pvParameters) {
+  for (;;) {
+    serialPoll();
+
+    uint32_t now = millis();
+
+    // IMU Loop
+    if (now - tImu >= IMU_PERIOD) {
+      tImu = now;
+      mpu6050Update();
+
+      xSemaphoreTake(serialMux, portMAX_DELAY);
+      Serial.print("$IMU,");
+      Serial.print(lastGX, 2); Serial.print(",");
+      Serial.print(lastGY, 2); Serial.print(",");
+      Serial.print(lastGZ, 2); Serial.print(",");
+      Serial.print(lastAX, 3); Serial.print(",");
+      Serial.print(lastAY, 3); Serial.print(",");
+      Serial.print(lastAZ, 3); Serial.print(",");
+      Serial.print(roll, 1);   Serial.print(",");
+      Serial.print(pitch, 1);  Serial.print(",");
+      Serial.println(yaw, 1);
+      xSemaphoreGive(serialMux);
+    }
+
+    // Servo Loop
+    if (now - tServo >= SERVO_PERIOD) {
+      float dt = (now - tServo) / 1000.0;
+      tServo = now;
+      servosUpdate(dt);
+    }
+
+    // Obstacle avoidance -- snapshot d[] under dMux before comparing
+    if(AVOIDER_ENABLED){
+      uint16_t dLocal[4];
+      portENTER_CRITICAL(&dMux);
+      dLocal[0]=d[0]; dLocal[1]=d[1]; dLocal[2]=d[2]; dLocal[3]=d[3];
+      portEXIT_CRITICAL(&dMux);
+
+      if(VX > 0 && vl53_ready[RIGHT_LIDAR]  && dLocal[RIGHT_LIDAR]  <= STOP_THRES){
+        driveMecanum(0, VY, 0);
+        xSemaphoreTake(serialMux, portMAX_DELAY);
+        Serial.print("$OBSTACLE,"); Serial.println(RIGHT_LIDAR);
+        xSemaphoreGive(serialMux);
+      }
+      if(VX < 0 && vl53_ready[LEFT_LIDAR]   && dLocal[LEFT_LIDAR]   <= STOP_THRES){
+        driveMecanum(0, VY, 0);
+        xSemaphoreTake(serialMux, portMAX_DELAY);
+        Serial.print("$OBSTACLE,"); Serial.println(LEFT_LIDAR);
+        xSemaphoreGive(serialMux);
+      }
+      if(VY > 0 && vl53_ready[FORWARD_LIDAR]&& dLocal[FORWARD_LIDAR]<= STOP_THRES){
+        driveMecanum(VX, 0, 0);
+        xSemaphoreTake(serialMux, portMAX_DELAY);
+        Serial.print("$OBSTACLE,"); Serial.println(FORWARD_LIDAR);
+        xSemaphoreGive(serialMux);
+      }
+      if(VY < 0 && vl53_ready[BACKWARD_LIDAR]&&dLocal[BACKWARD_LIDAR]<=STOP_THRES){
+        driveMecanum(VX, 0, 0);
+        xSemaphoreTake(serialMux, portMAX_DELAY);
+        Serial.print("$OBSTACLE,"); Serial.println(BACKWARD_LIDAR);
+        xSemaphoreGive(serialMux);
+      }
+    }
+
+    vTaskDelay(1); // yield so the core 1 idle task / watchdog gets serviced
+  }
+}
+
+void slowworkTask(void *pvParameters) {
+  for (;;) {
+    uint32_t now = millis();
+
+    // Button Loop
+    if (now - tButton >= BUTTON_PERIOD) {
+      tButton = now;
+      buttonPoll();
+      xSemaphoreTake(serialMux, portMAX_DELAY);
+      Serial.print("$BUTTON,");
+      Serial.print(digitalRead(BUTTON_PIN));
+      Serial.print(",");
+      Serial.println(digitalRead(BUTTON2_PIN));
+      xSemaphoreGive(serialMux);
+    }
+
+    // ADC Loop
+    if (now - tAdc >= ADC_PERIOD) {
+      tAdc = now;
+      float a0 = adsScaled(0);
+      float a1 = adsScaled(1);
+      float a2 = adsScaled(2);
+      float a3 = adsScaled(3);
+      xSemaphoreTake(serialMux, portMAX_DELAY);
+      Serial.print("$ADC,");
+      Serial.print(a0, 1); Serial.print(",");
+      Serial.print(a1, 1); Serial.print(",");
+      Serial.print(a2, 1); Serial.print(",");
+      Serial.println(a3, 1);
+      xSemaphoreGive(serialMux);
+    }
+
+    // Distance (VL53L0X) Loop
+    if (now - tLidar >= LIDAR_PERIOD) {
+      tLidar = now;
+      uint16_t dNew[4];
+      xSemaphoreTake(i2cMux, portMAX_DELAY);
+      for (uint8_t i = 0; i < 4; i++) {
+        dNew[i] = d[i]; // keep current value unless we get a fresh reading below
+        if (vl53_ready[i]) {
+          muxSelect(VL_CHANNELS[i]);
+          if (vl53[i].isRangeComplete()) {
+            int val = vl53[i].readRangeResult();
+            dNew[i] = (val < threshold_lidar) ? val : (uint16_t)threshold_lidar;
+          }
+        }
+      }
+      xSemaphoreGive(i2cMux);
+
+      portENTER_CRITICAL(&dMux);
+      d[0]=dNew[0]; d[1]=dNew[1]; d[2]=dNew[2]; d[3]=dNew[3];
+      portEXIT_CRITICAL(&dMux);
+
+      xSemaphoreTake(serialMux, portMAX_DELAY);
+      Serial.print("$DIST,");
+      Serial.print(dNew[0]); Serial.print(",");
+      Serial.print(dNew[1]); Serial.print(",");
+      Serial.print(dNew[2]); Serial.print(",");
+      Serial.println(dNew[3]);
+      xSemaphoreGive(serialMux);
+    }
+
+    // Color (TCS34725) Loop
+    if (now - tColor >= COLOR_PERIOD) {
+      tColor = now;
+      uint16_t r, g, b, c;
+      xSemaphoreTake(i2cMux, portMAX_DELAY);
+      muxSelect(TCS_CHANNEL);
+      tcs.getRawData(&r, &g, &b, &c);
+      xSemaphoreGive(i2cMux);
+
+      uint16_t lux = tcs.calculateLux(r, g, b);
+      float rPct = (c > 0) ? constrain(r * 100.0f / c, 0, 100) : 0;
+      float gPct = (c > 0) ? constrain(g * 100.0f / c, 0, 100) : 0;
+      float bPct = (c > 0) ? constrain(b * 100.0f / c, 0, 100) : 0;
+
+      xSemaphoreTake(serialMux, portMAX_DELAY);
+      Serial.print("$COLOR,");
+      Serial.print(lux);      Serial.print(",");
+      Serial.print(rPct, 1); Serial.print(",");
+      Serial.print(gPct, 1); Serial.print(",");
+      Serial.println(bPct, 1);
+      xSemaphoreGive(serialMux);
+    }
+
+    vTaskDelay(1); // yield so core 0's idle task / watchdog gets serviced
+  }
+}
+
 // ================= Setup & Loop =================
 void setup() {
   Serial.begin(921600);
@@ -370,6 +548,9 @@ void setup() {
   noTone(BUZZER_PIN);
 
   delay(300);
+
+  serialMux = xSemaphoreCreateMutex();
+  i2cMux    = xSemaphoreCreateMutex();
 
   mpuWrite(0x6B, 0x00); // wake up
   mpuWrite(0x1A, 0x01); // DLPF ~184Hz
@@ -448,7 +629,6 @@ void setup() {
     }
   } else {
     noTone(BUZZER_PIN); delay(4);
-    // O4 a, O5 d c — repeated 3x, L8 (125ms)
     tone(BUZZER_PIN, 440); delay(125); noTone(BUZZER_PIN); delay(4); // A4
     tone(BUZZER_PIN, 587); delay(125); noTone(BUZZER_PIN); delay(4);// D5
     tone(BUZZER_PIN, 523); delay(125); noTone(BUZZER_PIN); delay(4); // C5
@@ -461,7 +641,6 @@ void setup() {
     tone(BUZZER_PIN, 587); delay(125); noTone(BUZZER_PIN); delay(4); // D5
     tone(BUZZER_PIN, 523); delay(125); noTone(BUZZER_PIN); delay(4); // C5
 
-    // L16 dcdcdcdc (63ms each), octave still 5
     tone(BUZZER_PIN, 587); delay(63); noTone(BUZZER_PIN); delay(4); // D5
     tone(BUZZER_PIN, 523); delay(63); noTone(BUZZER_PIN); delay(4); // C5
     tone(BUZZER_PIN, 587); delay(63); noTone(BUZZER_PIN); delay(4); // D5
@@ -474,112 +653,19 @@ void setup() {
 
   lastTime = micros();
 
+  // Launch the two tasks pinned to their cores
+  xTaskCreatePinnedToCore(
+    fastworkTask, "FastWork", 4096, NULL, 2, &fastTaskHandle, 1 // core 1
+  );
+
+  xTaskCreatePinnedToCore(
+    slowworkTask, "SlowWork", 4096, NULL, 1, &slowTaskHandle, 0 // core 0
+  );
 }
 
 void loop() {
-  serialPoll();
-
-  uint32_t now = millis();
-
-  // IMU Loop
-  if (now - tImu >= IMU_PERIOD) {
-    tImu = now;
-    mpu6050Update();
-    Serial.print("$IMU,");
-    Serial.print(lastGX, 2); Serial.print(",");
-    Serial.print(lastGY, 2); Serial.print(",");
-    Serial.print(lastGZ, 2); Serial.print(",");
-    Serial.print(lastAX, 3); Serial.print(",");
-    Serial.print(lastAY, 3); Serial.print(",");
-    Serial.print(lastAZ, 3); Serial.print(",");
-    Serial.print(roll, 1);   Serial.print(",");
-    Serial.print(pitch, 1);  Serial.print(",");
-    Serial.println(yaw, 1);
-  }
-
-  // Servo Loop
-  if (now - tServo >= SERVO_PERIOD) {
-    float dt = (now - tServo) / 1000.0;
-    tServo = now;
-    servosUpdate(dt);
-  }
-
-  // Button Loop
-  if (now - tButton >= BUTTON_PERIOD) {
-    tButton = now;
-    buttonPoll();
-    Serial.print("$BUTTON,");
-    Serial.print(digitalRead(BUTTON_PIN));
-    Serial.print(",");
-    Serial.println(digitalRead(BUTTON2_PIN));
-  }
-
-  // ADC Loop
-  if (now - tAdc >= ADC_PERIOD) {
-    tAdc = now;
-    Serial.print("$ADC,");
-    Serial.print(adsScaled(0), 1); Serial.print(",");
-    Serial.print(adsScaled(1), 1); Serial.print(",");
-    Serial.print(adsScaled(2), 1); Serial.print(",");
-    Serial.println(adsScaled(3), 1);
-  }
-
-  // Distance (VL53L0X) Loop
-  if (now - tLidar >= LIDAR_PERIOD) {
-    tLidar = now;
-    for (uint8_t i = 0; i < 4; i++) {
-      if (vl53_ready[i]) {
-        muxSelect(VL_CHANNELS[i]);
-        if (vl53[i].isRangeComplete()) {
-          int val=0;
-          val = vl53[i].readRangeResult();
-          if(val<threshold_lidar){
-            d[i]=val;
-          } else {
-            d[i]=threshold_lidar;
-          }
-        }
-      }
-    }
-    Serial.print("$DIST,");
-    Serial.print(d[0]); Serial.print(",");
-    Serial.print(d[1]); Serial.print(",");
-    Serial.print(d[2]); Serial.print(",");
-    Serial.println(d[3]);
-  }
-  
-  if(AVOIDER_ENABLED){
-    if(VX > 0 && vl53_ready[RIGHT_LIDAR]  && d[RIGHT_LIDAR]  <= STOP_THRES){
-      driveMecanum(0, VY, 0);
-      Serial.print("$OBSTACLE,"); Serial.println(RIGHT_LIDAR);
-    }
-    if(VX < 0 && vl53_ready[LEFT_LIDAR]   && d[LEFT_LIDAR]   <= STOP_THRES){
-      driveMecanum(0, VY, 0);
-      Serial.print("$OBSTACLE,"); Serial.println(LEFT_LIDAR);
-    }
-    if(VY > 0 && vl53_ready[FORWARD_LIDAR]&& d[FORWARD_LIDAR]<= STOP_THRES){
-      driveMecanum(VX, 0, 0);
-      Serial.print("$OBSTACLE,"); Serial.println(FORWARD_LIDAR);
-    }
-    if(VY < 0 && vl53_ready[BACKWARD_LIDAR]&&d[BACKWARD_LIDAR]<=STOP_THRES){
-      driveMecanum(VX, 0, 0);
-      Serial.print("$OBSTACLE,"); Serial.println(BACKWARD_LIDAR);
-    }
-  }
-  // Color (TCS34725) Loop
-  if (now - tColor >= COLOR_PERIOD) {
-    tColor = now;
-    muxSelect(TCS_CHANNEL);
-    uint16_t r, g, b, c;
-    tcs.getRawData(&r, &g, &b, &c);
-    uint16_t lux = tcs.calculateLux(r, g, b);
-    float rPct = (c > 0) ? constrain(r * 100.0f / c, 0, 100) : 0;
-    float gPct = (c > 0) ? constrain(g * 100.0f / c, 0, 100) : 0;
-    float bPct = (c > 0) ? constrain(b * 100.0f / c, 0, 100) : 0;
-    Serial.print("$COLOR,");
-    Serial.print(lux);      Serial.print(",");
-    Serial.print(rPct, 1); Serial.print(",");
-    Serial.print(gPct, 1); Serial.print(",");
-    Serial.println(bPct, 1);
-  }
+  // All work now happens in fastworkTask (core 1) and slowworkTask (core 0).
+  // Arduino's loopTask already runs pinned to core 1 -- delete it so it
+  // doesn't compete with FastWork for core 1 time.
+  vTaskDelete(NULL);
 }
