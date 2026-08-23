@@ -26,9 +26,9 @@
 #define LED2_PIN     0         // strapping pin, fine once booted, white led
 #define BUZZER_PIN   18        // passive buzzer, driven via standard tone()
 #define TCA9548A_ADDR   0x71   // A0 tied high -> 0x71
-#define PCA9685_ADDR    0x40   // main bus, not muxed
-#define ADS1115_ADDR    0x48   // 4-channel ADC I2C Address
-#define MPU_ADDR 0x68          //  MPU6050 Address
+#define PCA9685_ADDR    0x40   // fast bus (GPIO 25/26), not muxed
+#define ADS1115_ADDR    0x48   // 4-channel ADC I2C Address, slow bus (GPIO 21/22)
+#define MPU_ADDR 0x68          //  MPU6050 Address, fast bus (GPIO 25/26)
 #define SERVO_COUNT   16       // Channels on PCA9685 (0-15, end inclusive)
 #define AVOIDER_ENABLED 1
 #define FORWARD_LIDAR 1
@@ -61,7 +61,7 @@ float pitchOffset = 0;
 volatile float VX=0;   // only ever touched from core 1 (fastwork/driveMecanum) in this split
 volatile float VY=0;   // no cross-core mutex needed, but kept volatile for safety
 volatile float SPEED=0;
-float STOP_THRES = 50;
+float STOP_THRES = 30.0;
 bool ledState1 = false;
 bool ledState2 = false;
 bool sensor_health=true;
@@ -71,10 +71,15 @@ bool lastButtonState = HIGH;
 bool lastButton2State = HIGH;                
 char serialBuf[64];                          
 
-Adafruit_ADS1115       ads;                                                                               // Object
-Adafruit_PWMServoDriver pca = Adafruit_PWMServoDriver(PCA9685_ADDR);                                      // Object
-Adafruit_VL53L0X       vl53[4];                                                                           // Object
-Adafruit_TCS34725      tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_101MS, TCS34725_GAIN_4X);         // Object
+// ===== I2C buses =====
+// Wire    (GPIO 21/22, default) : slow bus  -- ADS1115, TCA9548A mux -> VL53L0X x4, TCS34725
+// I2C_FAST(GPIO 25/26)          : fast bus  -- MPU6050, PCA9685
+TwoWire I2C_FAST = TwoWire(1);
+
+Adafruit_ADS1115       ads;                                                                               // Object, Wire (slow bus)
+Adafruit_PWMServoDriver pca = Adafruit_PWMServoDriver(PCA9685_ADDR, I2C_FAST);                            // Object, I2C_FAST (fast bus)
+Adafruit_VL53L0X       vl53[4];                                                                           // Object, Wire (slow bus, muxed)
+Adafruit_TCS34725      tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_101MS, TCS34725_GAIN_4X);         // Object, Wire (slow bus, muxed)
 
 struct ServoState {
   float current;   // deg
@@ -86,7 +91,6 @@ struct ServoState {
 // ===== Dual-core sync primitives =====
 portMUX_TYPE dMux = portMUX_INITIALIZER_UNLOCKED;   // protects d[] (written core0, read core1)
 SemaphoreHandle_t serialMux;                        // protects Serial.print() from interleaving across cores
-SemaphoreHandle_t i2cMux;                           // protects the shared I2C bus (MPU+PCA9685 on core1, ADS+VL53+TCS on core0)
 
 TaskHandle_t fastTaskHandle = NULL;
 TaskHandle_t slowTaskHandle = NULL;
@@ -96,35 +100,36 @@ ServoState servos[SERVO_COUNT];
 void servoWriteDeg(uint8_t channel, float deg);
 
 void muxSelect(uint8_t channel) {
+  // TCA9548A lives on the slow bus (Wire), only ever called from slowworkTask (core 0)
   Wire.beginTransmission(TCA9548A_ADDR);
   Wire.write(1 << channel);
   Wire.endTransmission();
 }
 
 void mpuWrite(uint8_t reg, uint8_t val){
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(reg);
-    Wire.write(val);
-    Wire.endTransmission();
+    I2C_FAST.beginTransmission(MPU_ADDR);
+    I2C_FAST.write(reg);
+    I2C_FAST.write(val);
+    I2C_FAST.endTransmission();
 }
 
 void mpuReadRaw(int16_t &ax, int16_t &ay, int16_t &az, int16_t &gx, int16_t &gy, int16_t &gz){
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B);
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14, true);
+  I2C_FAST.beginTransmission(MPU_ADDR);
+  I2C_FAST.write(0x3B);
+  I2C_FAST.endTransmission(false);
+  I2C_FAST.requestFrom(MPU_ADDR, 14, true);
 
-  ax = Wire.read() << 8 | Wire.read();
-  ay = Wire.read() << 8 | Wire.read();
-  az = Wire.read() << 8 | Wire.read();
-  Wire.read(); Wire.read(); // temp, skip
-  gx = Wire.read() << 8 | Wire.read();
-  gy = Wire.read() << 8 | Wire.read();
-  gz = Wire.read() << 8 | Wire.read();
+  ax = I2C_FAST.read() << 8 | I2C_FAST.read();
+  ay = I2C_FAST.read() << 8 | I2C_FAST.read();
+  az = I2C_FAST.read() << 8 | I2C_FAST.read();
+  I2C_FAST.read(); I2C_FAST.read(); // temp, skip
+  gx = I2C_FAST.read() << 8 | I2C_FAST.read();
+  gy = I2C_FAST.read() << 8 | I2C_FAST.read();
+  gz = I2C_FAST.read() << 8 | I2C_FAST.read();
 }
 
 void mpu6050Calibrate() {
-  // runs only during setup(), single-threaded, no i2cMux needed here
+  // runs only during setup(), single-threaded
   Serial.println("Calibrating gyro, keep still...");
   long sx = 0, sy = 0, sz = 0;
   const int N = 500;
@@ -154,11 +159,10 @@ void mpu6050Calibrate() {
 }
 
 void mpu6050Update() {
-  // called at runtime from fastwork (core 1) -- guard the I2C transaction
+  // called at runtime from fastwork (core 1) -- MPU is on I2C_FAST, which core 0
+  // never touches, so no mutex needed here anymore.
   int16_t ax, ay, az, gx, gy, gz;
-  xSemaphoreTake(i2cMux, portMAX_DELAY);
   mpuReadRaw(ax, ay, az, gx, gy, gz);
-  xSemaphoreGive(i2cMux);
 
   lastAX = ax; lastAY = ay; lastAZ = az;
   lastGX = gx; lastGY = gy; lastGZ = gz;
@@ -205,11 +209,9 @@ void buttonPoll() {
 }
 
 float adsScaled(uint8_t channel) {
-  // called from slowwork (core 0) -- guard the I2C transaction
-  xSemaphoreTake(i2cMux, portMAX_DELAY);
+  // called from slowwork (core 0) -- ADS1115 is on Wire, only touched by core 0
   int16_t raw = ads.readADC_SingleEnded(channel);
   float voltage = ads.computeVolts(raw);
-  xSemaphoreGive(i2cMux);
   // Full scale range is +-4.096V (32767 count = 4.096V)
   // Scaling relative to 3.3V max input voltage:
   float pct = (voltage / 3.3f) * 100.0f;
@@ -217,17 +219,14 @@ float adsScaled(uint8_t channel) {
 }
 
 void servoWriteDeg(uint8_t channel, float deg) {
-  // PCA9685 is only ever called from core 1 in this split (servosUpdate, driveMecanum,
-  // processCommand $SERVO), so no cross-core race here, but it shares the physical I2C
-  // bus with core 0's sensors, so still guard it with i2cMux to keep transactions atomic.
+  // PCA9685 is only ever called from core 1 (servosUpdate, driveMecanum,
+  // processCommand $SERVO) and lives on I2C_FAST, which core 0 never touches.
   deg = constrain(deg, 0.0, 180.0);
-  xSemaphoreTake(i2cMux, portMAX_DELAY);
   if(channel==3){
     pca.setPWM(channel, 0, map(deg,0,180,140,555));
   } else {
     pca.setPWM(channel, 0, map(deg,0,180,140,510));
   }
-  xSemaphoreGive(i2cMux);
 }
 
 void servosUpdate(float dt) {
@@ -478,7 +477,6 @@ void slowworkTask(void *pvParameters) {
     if (now - tLidar >= LIDAR_PERIOD) {
       tLidar = now;
       uint16_t dNew[4];
-      xSemaphoreTake(i2cMux, portMAX_DELAY);
       for (uint8_t i = 0; i < 4; i++) {
         dNew[i] = d[i]; // keep current value unless we get a fresh reading below
         if (vl53_ready[i]) {
@@ -489,7 +487,6 @@ void slowworkTask(void *pvParameters) {
           }
         }
       }
-      xSemaphoreGive(i2cMux);
 
       portENTER_CRITICAL(&dMux);
       d[0]=dNew[0]; d[1]=dNew[1]; d[2]=dNew[2]; d[3]=dNew[3];
@@ -508,10 +505,8 @@ void slowworkTask(void *pvParameters) {
     if (now - tColor >= COLOR_PERIOD) {
       tColor = now;
       uint16_t r, g, b, c;
-      xSemaphoreTake(i2cMux, portMAX_DELAY);
       muxSelect(TCS_CHANNEL);
       tcs.getRawData(&r, &g, &b, &c);
-      xSemaphoreGive(i2cMux);
 
       uint16_t lux = tcs.calculateLux(r, g, b);
       float rPct = (c > 0) ? constrain(r * 100.0f / c, 0, 100) : 0;
@@ -534,8 +529,12 @@ void slowworkTask(void *pvParameters) {
 // ================= Setup & Loop =================
 void setup() {
   Serial.begin(921600);
-  Wire.begin();
+
+  Wire.begin(21, 22);         // slow bus: ADS1115, TCA9548A mux -> VL53L0X x4, TCS34725
   Wire.setClock(400000);
+
+  I2C_FAST.begin(25, 26);     // fast bus: MPU6050, PCA9685
+  I2C_FAST.setClock(400000);
 
   pinMode(BUTTON_PIN, INPUT);
   pinMode(BUTTON2_PIN, INPUT);
@@ -550,7 +549,6 @@ void setup() {
   delay(300);
 
   serialMux = xSemaphoreCreateMutex();
-  i2cMux    = xSemaphoreCreateMutex();
 
   mpuWrite(0x6B, 0x00); // wake up
   mpuWrite(0x1A, 0x01); // DLPF ~184Hz
