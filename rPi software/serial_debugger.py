@@ -7,7 +7,7 @@ import serial
 import socket
 import time
 
-BAUD = 9600
+BAUD = 115200
 ARDUINO_VID = "2341"  # Arduino official VID; clones (CH340) often use 1a86:7523
 
 def get_ip():
