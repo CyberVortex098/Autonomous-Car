@@ -4,7 +4,7 @@
 
 ---
 
-**RECEIVED**
+**Received messages**
 
 | Message | Format | Fields | Limits |
 |---|---|---|---|
@@ -16,19 +16,18 @@
 
 ---
 
-**SENT**
+**Commands**
 
 | Command | Format | Example | Limits |
 |---|---|---|---|
 | LED | `$LED,<led1>,<led2>` | `$LED,1,0` | Each: 0 or 1 |
-| Beep | `$BEEP,<freq>,<dur>` | `$BEEP,1000,200` | Freq: 50–10000 Hz, Dur: 10–5000 ms |
+| Beep | `$BEEP,<freq>,<dur>` | `$BEEP,1000,200` | Freq: 50–15000 Hz, Dur: >0 ms |
 | Servo | `$SERVO,<ch>,<angle>,<mode>,<speed>` | `$SERVO,2,135,1,100` | Ch: 0–15, Angle: 0–180°, Mode: 1/2/3, Speed: positive integer  |
-| Move | `$MOVE,<x>,<y>` | `$MOVE,50,-30` | X, Y: -100 to +100 |
-| Rotate | `$ROTATE,<speed>,0` | `$ROTATE,25,0` | Speed: -100 to +100, |
+| Move | `$MOVE,<x>,<y>,<rotate>` | `$MOVE,50,-30,0` | X, Y, rotate: -100 to +100 |
 
 ---
 
 **Servo Modes**
-- `1` — Blocking ramp-up; in practice smoother than `3`
+- `1` — Non-blocking ramp-up
 - `2` — Direct (instant jump to angle)
-- `3` — Non-blocking ramp-up
+- `3` — Blocking ramp-up; in practice smoother than `1`
