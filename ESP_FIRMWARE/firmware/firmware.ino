@@ -45,7 +45,7 @@ const uint32_t LIDAR_PERIOD  = 28;            // 35.5 Hz    to boost, running fa
 const uint32_t COLOR_PERIOD  = 105;           // 9.5 Hz     
 const uint32_t ADC_PERIOD    = 17;            // 58.8 Hz
 const uint32_t BUTTON_PERIOD = 20;            // 50 Hz
-const uint32_t IMU_PERIOD    = 10;            // 100 Hz     to boost, running far below 
+const uint32_t IMU_PERIOD    = 4;            // 250hz
 const uint32_t SERVO_PERIOD  = 1;             // 1000 Hz
 uint32_t tLidar = 0, tColor = 0, tAdc = 0, tButton = 0, tImu = 0, tServo = 0;
 uint32_t lastMPUus = 0;
