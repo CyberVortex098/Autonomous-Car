@@ -16,7 +16,6 @@ pip install PyQt5 pyserial matplotlib
 
 ## Camera
 
-<<<<<<< Updated upstream
 ```sh
 ffplay -f v4l2 -video_size 640x480 -framerate 30 -i /dev/video0
 ```
