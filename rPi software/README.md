@@ -31,6 +31,3 @@ If pyserial is already installed (it is a dependency of the <a href="Debugger.py
 ```sh
 pip install pyudev
 ```
-=======
-<code>ffplay -f v4l2 -video_size 640x480 -framerate 30 -i /dev/video0<code>
->>>>>>> Stashed changes
