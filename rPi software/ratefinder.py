@@ -23,7 +23,7 @@ with serial.Serial(PORT, BAUD, timeout=1) as ser:
 
         now = time.time()
         dt = now - last_time
-        if dt >= 1.0:
+        if dt >= 3.0:
             parts = ", ".join(
                 f"{t.lstrip('$')}={counts[t]/dt:.1f}"
                 for t in TYPES
