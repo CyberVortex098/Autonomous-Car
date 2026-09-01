@@ -1,5 +1,10 @@
 # Running the files
 
+# Install all dependencies with pip
+```sh
+pip install PyQt5 pyserial matplotlib pyudev
+```
+
 ## Debugger
 
 Install libraries using
